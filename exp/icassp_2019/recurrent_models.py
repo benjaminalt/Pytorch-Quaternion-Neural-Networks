@@ -7,13 +7,13 @@
 ##########################################################
 
 import torch
-import torch.nn as nn
-from torch.nn import Parameter
-from torch.nn import functional as F
+import torch.nn                         as nn
+from   torch.nn                         import Parameter
+from   torch.nn                         import functional as F
 import torch.optim
-from torch import autograd
-from torch.autograd import Variable
-from quaternion_layers import *
+from   torch                            import autograd
+from   torch.autograd                   import Variable
+from   core_qnn.quaternion_layers       import *
 
 #
 # QRNN, RNN, QLSTM, and LSTM models are intended to work on copy_task.py
@@ -51,16 +51,15 @@ class QRNN(nn.Module):
             h_init = h_init.cuda()
         
         # Compute W * X in parallel
-
-        wx_out=self.wx(x)
-        h=h_init
+        wx_out = self.wx(x)
+        h      = h_init
         
         out = []
 
         # Navigate trough timesteps
         for k in range(x.shape[0]):
-            at=wx_out[k]+self.uh(h)
-            h=at
+            at = wx_out[k]+self.uh(h)
+            h  = at
             output = nn.Tanh()(self.fco(h))
 
             out.append(output.unsqueeze(0))
@@ -72,11 +71,11 @@ class QLSTM(nn.Module):
         super(QLSTM, self).__init__()
         
         # Reading options:
-        self.act=nn.Tanh()
-        self.act_gate=nn.Sigmoid()
-        self.input_dim=feat_size
-        self.hidden_dim=hidden_size
-        self.CUDA=CUDA
+        self.act        = nn.Tanh()
+        self.act_gate   = nn.Sigmoid()
+        self.input_dim  = feat_size
+        self.hidden_dim = hidden_size
+        self.CUDA       = CUDA
 
         # +1 because feat_size = the number on the sequence, and the output one hot will also have
         # a blank dimension so FEAT_SIZE + 1 BLANK 
@@ -96,7 +95,7 @@ class QLSTM(nn.Module):
         self.uch  = QuaternionLinearAutograd(self.hidden_dim, self.hidden_dim, bias=False) # Cell 
 
         # Output layer initialization
-        self.fco = nn.Linear(self.hidden_dim, self.num_classes)
+        self.fco  = nn.Linear(self.hidden_dim, self.num_classes)
 
         # Optimizer
         self.adam = torch.optim.Adam(self.parameters(), lr=0.005)
@@ -109,8 +108,8 @@ class QLSTM(nn.Module):
            
           
         if self.CUDA:
-            x=x.cuda()
-            h_init=h_init.cuda()
+            x      = x.cuda()
+            h_init = h_init.cuda()
         
            
         # Feed-forward affine transformation (done in parallel)
@@ -131,42 +130,24 @@ class QLSTM(nn.Module):
             it=self.act_gate(wix_out[k]+self.uih(h))
             ot=self.act_gate(wox_out[k]+self.uoh(h))
                   
-            at=wcx_out[k]+self.uch(h)       
-            c=it*self.act(at)+ft*c
-            h=ot*self.act(c)  
+            at = wcx_out[k]+self.uch(h)       
+            c  = it*self.act(at)+ft*c
+            h  = ot*self.act(c)  
 
             output = self.fco(h)
             out.append(output.unsqueeze(0))
      
         return torch.cat(out,0)
 
-class StackedQLSTM(nn.Module):
-    def __init__(self, feat_size, hidden_size, use_cuda, n_layers, batch_first=True):
-        super(StackedQLSTM, self).__init__()
-        self.batch_first = batch_first
-        self.layers = nn.ModuleList([QLSTM(feat_size, hidden_size, use_cuda) for _ in range(n_layers)])
-    
-    def forward(self, x):
-        # QLSTM takes inputs of shape (seq_len, batch_size, feat_size)
-        if self.batch_first:
-            x = x.permute(1,0,2)
-        for layer in self.layers:
-            x = layer(x)
-            # Remove extra feature added by QLSTM
-            x = x[:,:,:-1]
-        if self.batch_first:
-            x = x.permute(1,0,2)
-        return x
-
 class RNN(nn.Module):
     def __init__(self, feat_size, hidden_size, CUDA):
         super(RNN, self).__init__()
         
         # Reading options:
-        self.input_dim=feat_size
-        self.hidden_dim=hidden_size
-        self.num_classes=feat_size
-        self.CUDA=CUDA
+        self.input_dim      = feat_size
+        self.hidden_dim     = hidden_size
+        self.num_classes    = feat_size
+        self.CUDA           = CUDA
     
         # List initialization (Not used, but could be if multiple layers)
         self.wx  = nn.Linear(self.input_dim, self.hidden_dim) 
@@ -189,15 +170,15 @@ class RNN(nn.Module):
             h_init = h_init.cuda()
         
         # Compute W * X in parallel
-        wx_out=self.wx(x)
-        h=h_init
+        wx_out = self.wx(x)
+        h      = h_init
         
         out = []
 
         # Navigate trough timesteps
         for k in range(x.shape[0]):
-            at=wx_out[k]+self.uh(h)
-            h=at
+            at = wx_out[k]+self.uh(h)
+            h  = at
             output = nn.Tanh()(self.fco(h))
 
             out.append(output.unsqueeze(0))
@@ -209,11 +190,11 @@ class LSTM(nn.Module):
         super(LSTM, self).__init__()
         
         # Reading options:
-        self.act=nn.Tanh()
-        self.act_gate=nn.Sigmoid()
-        self.input_dim=feat_size
-        self.hidden_dim=hidden_size
-        self.CUDA=CUDA
+        self.act            = nn.Tanh()
+        self.act_gate       = nn.Sigmoid()
+        self.input_dim      = feat_size
+        self.hidden_dim     = hidden_size
+        self.CUDA           = CUDA
 
         # +1 because feat_size = the number on the sequence, and the output one hot will also have
         # a blank dimension so FEAT_SIZE + 1 BLANK 
@@ -246,8 +227,8 @@ class LSTM(nn.Module):
            
           
         if self.CUDA:
-            x=x.cuda()
-            h_init=h_init.cuda()
+            x       = x.cuda()
+            h_init  = h_init.cuda()
         
            
         # Feed-forward affine transformation (done in parallel)
@@ -268,9 +249,9 @@ class LSTM(nn.Module):
             it=self.act_gate(wix_out[k]+self.uih(h))
             ot=self.act_gate(wox_out[k]+self.uoh(h))
                   
-            at=wcx_out[k]+self.uch(h)       
-            c=it*self.act(at)+ft*c
-            h=ot*self.act(c)  
+            at = wcx_out[k]+self.uch(h)       
+            c  = it*self.act(at)+ft*c
+            h  = ot*self.act(c)  
 
             output = self.fco(h)
             out.append(output.unsqueeze(0))

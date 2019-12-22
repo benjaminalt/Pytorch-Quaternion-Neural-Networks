@@ -1,5 +1,5 @@
 ##########################################################
-# pytorch-qnn v1.0                                     
+# pytorch-qnn v1.0
 # Titouan Parcollet
 # LIA, Université d'Avignon et des Pays du Vaucluse
 # ORKIS, Aix-en-provence
@@ -8,30 +8,33 @@
 
 import sys
 import torch
-import torch.nn          as nn
-from torch.nn            import Parameter
-from torch.nn            import functional as F
+import torch.nn            as nn
+from   torch.nn            import Parameter
+from   torch.nn            import functional as F
 import torch.optim
-from torch.autograd      import Variable
-import numpy             as np
-from recurrent_models    import QRNN, RNN, LSTM, QLSTM
+from   torch.autograd      import Variable
+import numpy               as np
+from   recurrent_models    import QRNN, RNN, LSTM, QLSTM
 
 #
-# Convert to torch.Variable 
+# Convert to torch.Variable
 #
-def tovar(x):
-    return Variable(torch.FloatTensor(x).cuda())
+def tovar(x, cuda):
+    if cuda:
+        return Variable(torch.FloatTensor(x).cuda())
+    else:
+        return Variable(torch.FloatTensor(x.astype(np.float64)))
 
 def getTask(N_BATCH, SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, embedding):
     data   = []
     lab    = []
     seq    = []
     target = []
-    
+
     for i in range(N_BATCH):
 
         # Target values of blank and delim
-        blank = np.array([FEAT_SIZE])
+        blank = FEAT_SIZE
         delim = FEAT_SIZE + 1
 
         # Embedding
@@ -51,7 +54,7 @@ def getTask(N_BATCH, SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, embedding):
             random_index_list.append(random)
 
             seq.append(feat)
-            target.append(blank)        
+            target.append(blank)
 
         # BLANK
         for j in range(BLANK_SIZE - 1):
@@ -59,14 +62,14 @@ def getTask(N_BATCH, SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, embedding):
             target.append(blank)
 
         # Append a last blank to target for delimiter in input
-        target.append(blank)  
+        target.append(blank)
 
         # DELIMITER
         seq.append(delim_emb)
 
         # Append input to target
         for j in random_index_list:
-            
+
             target.append(j)
             seq.append(delim_emb)
 
@@ -78,6 +81,9 @@ def getTask(N_BATCH, SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, embedding):
 
     return np.array(data), np.array(lab)
 
+if not os.path.isdir('out'):
+    os.system('mkdir out')
+
 #
 # DEFINING THE TASK
 #
@@ -85,7 +91,7 @@ def getTask(N_BATCH, SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, embedding):
 if len(sys.argv) > 1:
     BLANK_SIZE = int(sys.argv[1])
 else:
-    BLANK_SIZE = 25
+    BLANK_SIZE = 10
 
 CUDA             = True
 N_BATCH_TRAIN    = 10
@@ -101,8 +107,12 @@ accs_r        = []
 accs_q        = []
 accs_test     = []
 
-net_r = LSTM(FEAT_SIZE, RNN_HIDDEN_SIZE, CUDA).cuda()
-net_q = QLSTM(FEAT_SIZE, QRNN_HIDDEN_SIZE, CUDA).cuda()
+if CUDA:
+    net_r = LSTM(FEAT_SIZE, RNN_HIDDEN_SIZE, CUDA).cuda()
+    net_q = QLSTM(FEAT_SIZE, QRNN_HIDDEN_SIZE, CUDA).cuda()
+else:
+    net_r = LSTM(FEAT_SIZE, RNN_HIDDEN_SIZE, CUDA)
+    net_q = QLSTM(FEAT_SIZE, QRNN_HIDDEN_SIZE, CUDA)
 
 emb   = nn.Embedding(FEAT_SIZE+2, FEAT_SIZE, max_norm=1.0)
 
@@ -126,7 +136,7 @@ break_q = False
 for epoch in range(EPOCHS):
 
     #
-    # The input sequence size is 2 times the sequence length + number_of_blank - 1 + 1 
+    # The input sequence size is 2 times the sequence length + number_of_blank - 1 + 1
     # (+ 1 for the delimiter). We generate N_BATCH_TRAIN new sequences each epoch
     #
     train, train_target = getTask(N_BATCH_TRAIN,SEQ_LENGTH, FEAT_SIZE, BLANK_SIZE, emb)
@@ -134,9 +144,9 @@ for epoch in range(EPOCHS):
     # Train shape must be (SEQ_LENGTH, BATCH_SIZE, FEATURE_SIZE) for QLSTM and LSTM
     train = train.reshape((BLANK_SIZE+(2*SEQ_LENGTH),N_BATCH_TRAIN,FEAT_SIZE))
 
-    train_var        = tovar(train)
-    train_target_var = tovar(train_target)
-    
+    train_var        = tovar(train, CUDA)
+    train_target_var = tovar(train_target, CUDA)
+
     # NN Training
     net_r.zero_grad()
     p = net_r.forward(train_var)
@@ -151,7 +161,7 @@ for epoch in range(EPOCHS):
 
     val_loss.backward()
     net_r.adam.step()
-    
+
     # Train ACC and LOSS
     p       = p.cpu().data.numpy()
     shape   = np.argmax(p, axis=2).shape
@@ -159,7 +169,7 @@ for epoch in range(EPOCHS):
     targets = targets.cpu().data.numpy()
     acc     = np.sum( p == targets) / (train_target.size)
 
-    
+
     if (epoch % 5) == 0:
         accs_r.append(acc)
         losses_r.append(float(val_loss.data))
@@ -183,7 +193,7 @@ for epoch in range(EPOCHS):
     p       = np.reshape(np.argmax(p, axis=2), shape[0]*shape[1])
     targets = targets.cpu().data.numpy()
     acc     = np.sum( p == targets) / (train_target.size)
-    
+
     if (epoch % 5) == 0:
         losses_q.append(float(val_loss.data))
         accs_q.append(acc)
@@ -193,9 +203,9 @@ for epoch in range(EPOCHS):
 
 print("Training Ended - Saving Acc and losses in RES")
 
-np.savetxt("RES/memory_task_acc_q_"+str(BLANK_SIZE)+".txt", accs_q)
-np.savetxt("RES/memory_task_acc_r_"+str(BLANK_SIZE)+".txt", accs_r)
-np.savetxt("RES/memory_task_loss_q_"+str(BLANK_SIZE)+".txt", losses_q)
-np.savetxt("RES/memory_task_loss_r_"+str(BLANK_SIZE)+".txt", losses_r)
+np.savetxt("out/memory_task_acc_q_"+str(BLANK_SIZE)+".txt", accs_q)
+np.savetxt("out/memory_task_acc_r_"+str(BLANK_SIZE)+".txt", accs_r)
+np.savetxt("out/memory_task_loss_q_"+str(BLANK_SIZE)+".txt", losses_q)
+np.savetxt("out/memory_task_loss_r_"+str(BLANK_SIZE)+".txt", losses_r)
 
 print("Done ! That's All Folks ;) !")

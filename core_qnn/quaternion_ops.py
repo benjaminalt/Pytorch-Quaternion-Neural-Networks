@@ -1,5 +1,5 @@
 ##########################################################
-# pytorch-qnn v1.0                                     
+# pytorch-qnn v1.0
 # Titouan Parcollet
 # LIA, Université d'Avignon et des Pays du Vaucluse
 # ORKIS, Aix-en-provence
@@ -12,21 +12,39 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import numpy as np
 from numpy.random import RandomState
-from scipy.stats import chi
 import sys
+import pdb
+from scipy.stats import chi
 
+def q_normalize(input, channel=1):
+
+    r = get_r(input)
+    i = get_i(input)
+    j = get_j(input)
+    k = get_k(input)
+
+    norm = torch.sqrt(r*r + i*i + j*j + k*k + 0.0001)
+    r = r / norm
+    i = i / norm
+    j = j / norm
+    k = k / norm
+
+    return torch.cat([r,i,j,k], dim=channel)
 
 
 def check_input(input):
 
-    if input.dim() not in {2, 3}:
+    if input.dim() not in {2, 3, 4, 5}:
         raise RuntimeError(
-            "quaternion linear accepts only input of dimension 2 or 3."
+            "Quaternion linear accepts only input of dimension 2 or 3. Quaternion conv accepts up to 5 dim "
             " input.dim = " + str(input.dim())
         )
 
-    nb_hidden = input.size()[-1]
-    
+    if input.dim() < 4:
+        nb_hidden = input.size()[-1]
+    else:
+        nb_hidden = input.size()[1]
+
     if nb_hidden % 4 != 0:
         raise RuntimeError(
             "Quaternion Tensors must be divisible by 4."
@@ -37,36 +55,56 @@ def check_input(input):
 #
 def get_r(input):
     check_input(input)
-    nb_hidden = input.size()[-1]
+    if input.dim() < 4:
+        nb_hidden = input.size()[-1]
+    else:
+        nb_hidden = input.size()[1]
+
     if input.dim() == 2:
-        return input.narrow(1, 0, nb_hidden // 4) 
-    elif input.dim() == 3:
-        return input.narrow(2, 0, nb_hidden // 4) 
+        return input.narrow(1, 0, nb_hidden // 4)
+    if input.dim() == 3:
+        return input.narrow(2, 0, nb_hidden // 4)
+    if input.dim() >= 4:
+        return input.narrow(1, 0, nb_hidden // 4)
 
 
 def get_i(input):
-    check_input(input)
-    nb_hidden = input.size()[-1]
+    if input.dim() < 4:
+        nb_hidden = input.size()[-1]
+    else:
+        nb_hidden = input.size()[1]
     if input.dim() == 2:
-        return input.narrow(1, nb_hidden // 4, nb_hidden // 4) 
+        return input.narrow(1, nb_hidden // 4, nb_hidden // 4)
     if input.dim() == 3:
-        return input.narrow(2, nb_hidden // 4, nb_hidden // 4) 
+        return input.narrow(2, nb_hidden // 4, nb_hidden // 4)
+    if input.dim() >= 4:
+        return input.narrow(1, nb_hidden // 4, nb_hidden // 4)
 
 def get_j(input):
     check_input(input)
-    nb_hidden = input.size()[-1]
+    if input.dim() < 4:
+        nb_hidden = input.size()[-1]
+    else:
+        nb_hidden = input.size()[1]
     if input.dim() == 2:
-        return input.narrow(1, nb_hidden // 2, nb_hidden // 4) 
+        return input.narrow(1, nb_hidden // 2, nb_hidden // 4)
     if input.dim() == 3:
-        return input.narrow(2, nb_hidden // 2, nb_hidden // 4) 
+        return input.narrow(2, nb_hidden // 2, nb_hidden // 4)
+    if input.dim() >= 4:
+        return input.narrow(1, nb_hidden // 2, nb_hidden // 4)
 
 def get_k(input):
     check_input(input)
-    nb_hidden = input.size()[-1]
+    if input.dim() < 4:
+        nb_hidden = input.size()[-1]
+    else:
+        nb_hidden = input.size()[1]
     if input.dim() == 2:
-        return input.narrow(1, nb_hidden - nb_hidden // 4, nb_hidden // 4) 
+        return input.narrow(1, nb_hidden - nb_hidden // 4, nb_hidden // 4)
     if input.dim() == 3:
-        return input.narrow(2, nb_hidden - nb_hidden // 4, nb_hidden // 4) 
+        return input.narrow(2, nb_hidden - nb_hidden // 4, nb_hidden // 4)
+    if input.dim() >= 4:
+        return input.narrow(1, nb_hidden - nb_hidden // 4, nb_hidden // 4)
 
 
 def get_modulus(input, vector_form=False):
@@ -80,30 +118,6 @@ def get_modulus(input, vector_form=False):
     else:
         return torch.sqrt((r * r + i * i + j * j + k * k).sum(dim=0))
 
-def q_normalize(input, channel=-1):
-
-    if channel != -1:
-        dim   = int(input.dim()) - 1
-        input = input.transpose(dim,channel)
-
-    r = get_r(input) 
-    i = get_i(input)
-    j = get_j(input)
-    k = get_k(input)
-
-    norm = torch.sqrt(r*r + i*i + j*j + k*k + 0.00001)
-    r = r / norm
-    i = i / norm
-    j = j / norm
-    k = k / norm
-
-    input = torch.cat([r,i,j,k], dim=-1)
-
-    if channel != -1:
-        dim = int(input.dim()) - 1
-        return input.transpose(dim, channel)
-    else:
-        return input
 
 def get_normalized(input, eps=0.0001):
     check_input(input)
@@ -115,8 +129,27 @@ def get_normalized(input, eps=0.0001):
     return input / (data_modulus_repeated.expand_as(input) + eps)
 
 
+def quaternion_exp(input):
 
-def quaternion_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride, 
+    r      = get_r(input)
+    i      = get_i(input)
+    j      = get_j(input)
+    k      = get_k(input)
+
+
+    norm_v = torch.sqrt(i*i+j*j+k*k) + 0.0001
+    exp    = torch.exp(r)
+
+    r      = torch.cos(norm_v)
+    i      = (i / norm_v) * torch.sin(norm_v)
+    j      = (j / norm_v) * torch.sin(norm_v)
+    k      = (k / norm_v) * torch.sin(norm_v)
+
+
+    return torch.cat([exp*r, exp*i, exp*j, exp*k], dim=1)
+
+
+def quaternion_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride,
                     padding, groups, dilatation):
     """
     Applies a quaternion convolution to the incoming data:
@@ -126,6 +159,7 @@ def quaternion_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride,
     cat_kernels_4_i = torch.cat([i_weight,  r_weight, -k_weight, j_weight], dim=1)
     cat_kernels_4_j = torch.cat([j_weight,  k_weight, r_weight, -i_weight], dim=1)
     cat_kernels_4_k = torch.cat([k_weight,  -j_weight, i_weight, r_weight], dim=1)
+
     cat_kernels_4_quaternion   = torch.cat([cat_kernels_4_r, cat_kernels_4_i, cat_kernels_4_j, cat_kernels_4_k], dim=0)
 
     if   input.dim() == 3:
@@ -140,7 +174,7 @@ def quaternion_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride,
 
     return convfunc(input, cat_kernels_4_quaternion, bias, stride, padding, dilatation, groups)
 
-def quaternion_transpose_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride, 
+def quaternion_transpose_conv(input, r_weight, i_weight, j_weight, k_weight, bias, stride,
                     padding, output_padding, groups, dilatation):
     """
     Applies a quaternion trasposed convolution to the incoming data:
@@ -167,8 +201,8 @@ def quaternion_transpose_conv(input, r_weight, i_weight, j_weight, k_weight, bia
     return convfunc(input, cat_kernels_4_quaternion, bias, stride, padding, output_padding, groups, dilatation)
 
 
-def quaternion_conv_rotation(input, r_weight, i_weight, j_weight, k_weight, bias, stride, 
-                    padding, groups, dilatation):
+def quaternion_conv_rotation(input, zero_kernel, r_weight, i_weight, j_weight, k_weight, bias, stride,
+                    padding, groups, dilatation, quaternion_format, scale=None):
     """
     Applies a quaternion rotation and convolution transformation to the incoming data:
 
@@ -176,9 +210,9 @@ def quaternion_conv_rotation(input, r_weight, i_weight, j_weight, k_weight, bias
     https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
 
     Works for unitary and non unitary weights.
-        
+
     The initial size of the input must be a multiple of 3 if quaternion_format = False and
-    4 if quaternion_format = True. 
+    4 if quaternion_format = True.
     """
 
     square_r          = (r_weight*r_weight)
@@ -186,35 +220,58 @@ def quaternion_conv_rotation(input, r_weight, i_weight, j_weight, k_weight, bias
     square_j          = (j_weight*j_weight)
     square_k          = (k_weight*k_weight)
 
-    norm              = torch.sqrt(square_r+square_i+square_j+square_k)
-    norm_factor       = 2.0*norm
+    norm              = torch.sqrt(square_r+square_i+square_j+square_k + 0.0001)
 
-    square_i          = norm_factor*(i_weight*i_weight)
-    square_j          = norm_factor*(j_weight*j_weight)
-    square_k          = norm_factor*(k_weight*k_weight)
+    #print(norm)
 
-    ri                = (norm_factor*r_weight*i_weight)
-    rj                = (norm_factor*r_weight*j_weight)
-    rk                = (norm_factor*r_weight*k_weight)
+    r_n_weight          = (r_weight / norm)
+    i_n_weight          = (i_weight / norm)
+    j_n_weight          = (j_weight / norm)
+    k_n_weight          = (k_weight / norm)
 
-    ij                = (norm_factor*i_weight*j_weight)
-    ik                = (norm_factor*i_weight*k_weight)
-    
-    jk                = (norm_factor*j_weight*k_weight)
+    norm_factor       = 2.0
+
+    square_i          = norm_factor*(i_n_weight*i_n_weight)
+    square_j          = norm_factor*(j_n_weight*j_n_weight)
+    square_k          = norm_factor*(k_n_weight*k_n_weight)
+
+    ri                = (norm_factor*r_n_weight*i_n_weight)
+    rj                = (norm_factor*r_n_weight*j_n_weight)
+    rk                = (norm_factor*r_n_weight*k_n_weight)
+
+    ij                = (norm_factor*i_n_weight*j_n_weight)
+    ik                = (norm_factor*i_n_weight*k_n_weight)
+
+    jk                = (norm_factor*j_n_weight*k_n_weight)
 
     if quaternion_format:
-        zero_kernel   = torch.zeros(r_weight.shape).cuda()
-        rot_kernel_1  = torch.cat([zero_kernel, 1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([zero_kernel, ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([zero_kernel, ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
+        if scale is not None:
+            rot_kernel_1  = torch.cat([zero_kernel, scale * (1.0 - (square_j + square_k)), scale *(ij-rk), scale *(ik+rj)], dim=1)
+            rot_kernel_2  = torch.cat([zero_kernel, scale *(ij+rk), scale *(1.0 - (square_i + square_k)), scale *(jk-ri)], dim=1)
+            rot_kernel_3  = torch.cat([zero_kernel, scale *(ik-rj), scale *(jk+ri), scale *(1.0 - (square_i + square_j))], dim=1)
+        else:
+            rot_kernel_1  = torch.cat([zero_kernel, (1.0 - (square_j + square_k)), (ij-rk), (ik+rj)], dim=1)
+            rot_kernel_2  = torch.cat([zero_kernel, (ij+rk), (1.0 - (square_i + square_k)), (jk-ri)], dim=1)
+            rot_kernel_3  = torch.cat([zero_kernel, (ik-rj), (jk+ri), (1.0 - (square_i + square_j))], dim=1)
 
-        zero_kernel2  = torch.zeros(rot_kernel_1.shape).cuda()
-        global_rot_kernel = torch.cat([zero_kernel2, rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+        zero_kernel2  = torch.cat([zero_kernel, zero_kernel, zero_kernel, zero_kernel], dim=1)
+        global_rot_kernel = torch.cat([zero_kernel2, rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=0)
+
     else:
-        rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
-        global_rot_kernel = torch.cat([rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+        if scale is not None:
+            rot_kernel_1  = torch.cat([scale * (1.0 - (square_j + square_k)), scale *(ij-rk), scale *(ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([scale *(ij+rk), scale *(1.0 - (square_i + square_k)), scale *(jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([scale *(ik-rj), scale *(jk+ri), scale *(1.0 - (square_i + square_j))], dim=0)
+        else:
+            rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), (ij-rk), (ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([(ij+rk), 1.0 - (square_i + square_k), (jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([(ik-rj), (jk+ri), (1.0 - (square_i + square_j))], dim=0)
+
+        global_rot_kernel = torch.cat([rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=0)
+
+    #print(input.shape)
+    #print(square_r.shape)
+    #print(global_rot_kernel.shape)
 
     if   input.dim() == 3:
         convfunc = F.conv1d
@@ -228,7 +285,7 @@ def quaternion_conv_rotation(input, r_weight, i_weight, j_weight, k_weight, bias
 
     return convfunc(input, global_rot_kernel, bias, stride, padding, dilatation, groups)
 
-def quaternion_transpose_conv_rotation(input, r_weight, i_weight, j_weight, k_weight, bias, stride, 
+def quaternion_transpose_conv_rotation(input, zero_kernel, r_weight, i_weight, j_weight, k_weight, bias, stride,
                     padding, output_padding, groups, dilatation, quaternion_format):
     """
     Applies a quaternion rotation and transposed convolution transformation to the incoming data:
@@ -237,9 +294,9 @@ def quaternion_transpose_conv_rotation(input, r_weight, i_weight, j_weight, k_we
     https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
 
     Works for unitary and non unitary weights.
-        
+
     The initial size of the input must be a multiple of 3 if quaternion_format = False and
-    4 if quaternion_format = True. 
+    4 if quaternion_format = True.
 
     """
 
@@ -248,8 +305,14 @@ def quaternion_transpose_conv_rotation(input, r_weight, i_weight, j_weight, k_we
     square_j          = (j_weight*j_weight)
     square_k          = (k_weight*k_weight)
 
-    norm              = torch.sqrt(square_r+square_i+square_j+square_k)
-    norm_factor       = 2.0*norm
+    norm              = torch.sqrt(square_r+square_i+square_j+square_k + 0.0001)
+
+    r_weight          = (r_weight / norm)
+    i_weight          = (i_weight / norm)
+    j_weight          = (j_weight / norm)
+    k_weight          = (k_weight / norm)
+
+    norm_factor       = 2.0
 
     square_i          = norm_factor*(i_weight*i_weight)
     square_j          = norm_factor*(j_weight*j_weight)
@@ -261,22 +324,21 @@ def quaternion_transpose_conv_rotation(input, r_weight, i_weight, j_weight, k_we
 
     ij                = (norm_factor*i_weight*j_weight)
     ik                = (norm_factor*i_weight*k_weight)
-    
+
     jk                = (norm_factor*j_weight*k_weight)
 
     if quaternion_format:
-        zero_kernel   = torch.zeros(r_weight.shape).cuda()
-        rot_kernel_1  = torch.cat([zero_kernel, 1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([zero_kernel, ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([zero_kernel, ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
+        rot_kernel_1  = torch.cat([zero_kernel, 1.0 - (square_j + square_k), ij-rk, ik+rj], dim=1)
+        rot_kernel_2  = torch.cat([zero_kernel, ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=1)
+        rot_kernel_3  = torch.cat([zero_kernel, ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=1)
 
         zero_kernel2  = torch.zeros(rot_kernel_1.shape).cuda()
-        global_rot_kernel = torch.cat([zero_kernel2, rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+        global_rot_kernel = torch.cat([zero_kernel2, rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=0)
     else:
-        rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
-        global_rot_kernel = torch.cat([rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+        rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), ij-rk, ik+rj], dim=1)
+        rot_kernel_2  = torch.cat([ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=1)
+        rot_kernel_3  = torch.cat([ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=1)
+        global_rot_kernel = torch.cat([rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=0)
 
 
     if   input.dim() == 3:
@@ -313,7 +375,7 @@ def quaternion_linear(input, r_weight, i_weight, j_weight, k_weight, bias=True):
 
         if bias is not None:
             return torch.addmm(bias, input, cat_kernels_4_quaternion)
-        else: 
+        else:
             return torch.mm(input, cat_kernels_4_quaternion)
     else:
         output = torch.matmul(input, cat_kernels_4_quaternion)
@@ -323,7 +385,8 @@ def quaternion_linear(input, r_weight, i_weight, j_weight, k_weight, bias=True):
             return output
 
 
-def quaternion_linear_rotation(input, r_weight, i_weight, j_weight, k_weight, bias=None, quaternion_format=False):
+def quaternion_linear_rotation(input, zero_kernel, r_weight, i_weight, j_weight, k_weight, bias=None,
+                               quaternion_format=False, scale=None):
     """
     Applies a quaternion rotation transformation to the incoming data:
 
@@ -331,54 +394,68 @@ def quaternion_linear_rotation(input, r_weight, i_weight, j_weight, k_weight, bi
     https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
 
     Works for unitary and non unitary weights.
-        
-    The initial size of the input must be a multiple of 3 if quaternion_format = False and
-    4 if quaternion_format = True. 
-    """
 
+    The initial size of the input must be a multiple of 3 if quaternion_format = False and
+    4 if quaternion_format = True.
+    """
 
     square_r          = (r_weight*r_weight)
     square_i          = (i_weight*i_weight)
     square_j          = (j_weight*j_weight)
     square_k          = (k_weight*k_weight)
 
-    norm              = torch.sqrt(square_r+square_i+square_j+square_k)
-    norm_factor       = 2.0*norm
+    norm              = torch.sqrt(square_r+square_i+square_j+square_k + 0.0001)
 
-    square_i          = norm_factor*(i_weight*i_weight)
-    square_j          = norm_factor*(j_weight*j_weight)
-    square_k          = norm_factor*(k_weight*k_weight)
+    r_n_weight          = (r_weight / norm)
+    i_n_weight          = (i_weight / norm)
+    j_n_weight          = (j_weight / norm)
+    k_n_weight          = (k_weight / norm)
 
-    ri                = (norm_factor*r_weight*i_weight)
-    rj                = (norm_factor*r_weight*j_weight)
-    rk                = (norm_factor*r_weight*k_weight)
+    norm_factor       = 2.0
 
-    ij                = (norm_factor*i_weight*j_weight)
-    ik                = (norm_factor*i_weight*k_weight)
-    
-    jk                = (norm_factor*j_weight*k_weight)
+    square_i          = norm_factor*(i_n_weight*i_n_weight)
+    square_j          = norm_factor*(j_n_weight*j_n_weight)
+    square_k          = norm_factor*(k_n_weight*k_n_weight)
+
+    ri                = (norm_factor*r_n_weight*i_n_weight)
+    rj                = (norm_factor*r_n_weight*j_n_weight)
+    rk                = (norm_factor*r_n_weight*k_n_weight)
+
+    ij                = (norm_factor*i_n_weight*j_n_weight)
+    ik                = (norm_factor*i_n_weight*k_n_weight)
+
+    jk                = (norm_factor*j_n_weight*k_n_weight)
 
     if quaternion_format:
-        zero_kernel   = torch.zeros(r_weight.shape).cuda()
-        rot_kernel_1  = torch.cat([zero_kernel, 1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([zero_kernel, ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([zero_kernel, ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
+        if scale is not None:
+            rot_kernel_1  = torch.cat([zero_kernel, scale * (1.0 - (square_j + square_k)), scale *(ij-rk), scale *(ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([zero_kernel, scale *(ij+rk), scale *(1.0 - (square_i + square_k)), scale *(jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([zero_kernel, scale *(ik-rj), scale *(jk+ri), scale *(1.0 - (square_i + square_j))], dim=0)
+        else:
+            rot_kernel_1  = torch.cat([zero_kernel, (1.0 - (square_j + square_k)), (ij-rk), (ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([zero_kernel, (ij+rk), (1.0 - (square_i + square_k)), (jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([zero_kernel, (ik-rj), (jk+ri), (1.0 - (square_i + square_j))], dim=0)
 
-        zero_kernel2  = torch.zeros(rot_kernel_1.shape).cuda()
+        zero_kernel2  = torch.cat([zero_kernel, zero_kernel, zero_kernel, zero_kernel], dim=0)
         global_rot_kernel = torch.cat([zero_kernel2, rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+
     else:
-        rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), ij-rk, ik+rj], dim=0)
-        rot_kernel_2  = torch.cat([ij+rk, 1.0 - (square_i + square_k), jk-ri], dim=0)
-        rot_kernel_3  = torch.cat([ik-rj, jk+ri, 1.0 - (square_i + square_j)], dim=0)
+        if scale is not None:
+            rot_kernel_1  = torch.cat([scale * (1.0 - (square_j + square_k)), scale *(ij-rk), scale *(ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([scale *(ij+rk), scale *(1.0 - (square_i + square_k)), scale *(jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([scale *(ik-rj), scale *(jk+ri), scale *(1.0 - (square_i + square_j))], dim=0)
+        else:
+            rot_kernel_1  = torch.cat([1.0 - (square_j + square_k), (ij-rk), (ik+rj)], dim=0)
+            rot_kernel_2  = torch.cat([(ij+rk), 1.0 - (square_i + square_k), (jk-ri)], dim=0)
+            rot_kernel_3  = torch.cat([(ik-rj), (jk+ri), (1.0 - (square_i + square_j))], dim=0)
+
         global_rot_kernel = torch.cat([rot_kernel_1, rot_kernel_2, rot_kernel_3], dim=1)
+
 
     if input.dim() == 2 :
         if bias is not None:
-            #print(bias.shape)
-            #print(input.shape)
-            #print(global_rot_kernel.shape)
             return torch.addmm(bias, input, global_rot_kernel)
-        else: 
+        else:
             return torch.mm(input, global_rot_kernel)
     else:
         output = torch.matmul(input, global_rot_kernel)
@@ -386,10 +463,10 @@ def quaternion_linear_rotation(input, r_weight, i_weight, j_weight, k_weight, bi
             return output+bias
         else:
             return output
-    
-            
 
-# Custom AUTOGRAD for lower VRAM consumption 
+
+
+# Custom AUTOGRAD for lower VRAM consumption
 class QuaternionLinearFunction(torch.autograd.Function):
 
     @staticmethod
@@ -404,7 +481,7 @@ class QuaternionLinearFunction(torch.autograd.Function):
         if input.dim() == 2 :
             if bias is not None:
                 return torch.addmm(bias, input, cat_kernels_4_quaternion)
-            else: 
+            else:
                 return torch.mm(input, cat_kernels_4_quaternion)
         else:
             output = torch.matmul(input, cat_kernels_4_quaternion)
@@ -416,10 +493,10 @@ class QuaternionLinearFunction(torch.autograd.Function):
     # This function has only a single output, so it gets only one gradient
     @staticmethod
     def backward(ctx, grad_output):
-        
+
         input, r_weight, i_weight, j_weight, k_weight, bias = ctx.saved_tensors
         grad_input = grad_weight_r = grad_weight_i = grad_weight_j = grad_weight_k = grad_bias = None
-        
+
         input_r = torch.cat([r_weight, -i_weight, -j_weight, -k_weight], dim=0)
         input_i = torch.cat([i_weight,  r_weight, -k_weight, j_weight], dim=0)
         input_j = torch.cat([j_weight,  k_weight, r_weight, -i_weight], dim=0)
@@ -458,7 +535,7 @@ class QuaternionLinearFunction(torch.autograd.Function):
             grad_weight_k = grad_weight.narrow(0,0,unit_size_x).narrow(1,unit_size_y*3,unit_size_y)
         if ctx.needs_input_grad[5]:
             grad_bias   = grad_output.sum(0).squeeze(0)
-        
+
         return grad_input, grad_weight_r, grad_weight_i, grad_weight_j, grad_weight_k, grad_bias
 
 def hamilton_product(q0, q1):
@@ -466,18 +543,18 @@ def hamilton_product(q0, q1):
     Applies a Hamilton product q0 * q1:
     Shape:
         - q0, q1 should be (batch_size, quaternion_number)
-        (rr' - xx' - yy' - zz')  + 
+        (rr' - xx' - yy' - zz')  +
         (rx' + xr' + yz' - zy')i +
         (ry' - xz' + yr' + zx')j +
-        (rz' + xy' - yx' + zr')k + 
-    """   
+        (rz' + xy' - yx' + zr')k +
+    """
 
     q1_r = get_r(q1)
     q1_i = get_i(q1)
     q1_j = get_j(q1)
     q1_k = get_k(q1)
 
-    # rr', xx', yy', and zz' 
+    # rr', xx', yy', and zz'
     r_base = torch.mul(q0, q1)
     # (rr' - xx' - yy' - zz')
     r   = get_r(r_base) - get_i(r_base) - get_j(r_base) - get_k(r_base)
@@ -500,25 +577,19 @@ def hamilton_product(q0, q1):
     return torch.cat([r, i, j, k], dim=1)
 
 #
-# PARAMETERS INITIALIZATION 
+# PARAMETERS INITIALIZATION
 #
 
 def unitary_init(in_features, out_features, rng, kernel_size=None, criterion='he'):
-    
+
     if kernel_size is not None:
         receptive_field = np.prod(kernel_size)
         fan_in          = in_features  * receptive_field
         fan_out         = out_features * receptive_field
     else:
-        fan_in          = in_features  
-        fan_out         = out_features 
+        fan_in          = in_features
+        fan_out         = out_features
 
-    if criterion == 'glorot':
-        s = 1. / np.sqrt(2*(fan_in + fan_out))
-    elif criterion == 'he':
-        s = 1. / np.sqrt(2*fan_in)
-    else:
-        raise ValueError('Invalid criterion: ' + criterion)
 
     if kernel_size is None:
         kernel_shape = (in_features, out_features)
@@ -528,14 +599,12 @@ def unitary_init(in_features, out_features, rng, kernel_size=None, criterion='he
         else:
             kernel_shape = (out_features, in_features) + (*kernel_size,)
 
-    s = np.sqrt(3.0) * s
+    number_of_weights = np.prod(kernel_shape)
+    v_r = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_i = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_j = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_k = np.random.uniform(-1.0,1.0,number_of_weights)
 
-    number_of_weights = np.prod(kernel_shape) 
-    v_r = np.random.uniform(-s,s,number_of_weights)
-    v_i = np.random.uniform(-s,s,number_of_weights)
-    v_j = np.random.uniform(-s,s,number_of_weights)
-    v_k = np.random.uniform(-s,s,number_of_weights)
-    
     # Unitary quaternion
     for i in range(0, number_of_weights):
         norm = np.sqrt(v_r[i]**2 + v_i[i]**2 + v_j[i]**2 + v_k[i]**2)+0.0001
@@ -543,7 +612,6 @@ def unitary_init(in_features, out_features, rng, kernel_size=None, criterion='he
         v_i[i]/= norm
         v_j[i]/= norm
         v_k[i]/= norm
-
     v_r = v_r.reshape(kernel_shape)
     v_i = v_i.reshape(kernel_shape)
     v_j = v_j.reshape(kernel_shape)
@@ -552,14 +620,14 @@ def unitary_init(in_features, out_features, rng, kernel_size=None, criterion='he
     return (v_r, v_i, v_j, v_k)
 
 def random_init(in_features, out_features, rng, kernel_size=None, criterion='glorot'):
-    
+
     if kernel_size is not None:
         receptive_field = np.prod(kernel_size)
         fan_in          = in_features  * receptive_field
         fan_out         = out_features * receptive_field
     else:
-        fan_in          = in_features  
-        fan_out         = out_features 
+        fan_in          = in_features
+        fan_out         = out_features
 
     if criterion == 'glorot':
         s = 1. / np.sqrt(2*(fan_in + fan_out))
@@ -576,33 +644,35 @@ def random_init(in_features, out_features, rng, kernel_size=None, criterion='glo
         else:
             kernel_shape = (out_features, in_features) + (*kernel_size,)
 
-    number_of_weights = np.prod(kernel_shape) 
-    v_r = np.random.uniform(0.0,1.0,number_of_weights)
-    v_i = np.random.uniform(0.0,1.0,number_of_weights)
-    v_j = np.random.uniform(0.0,1.0,number_of_weights)
-    v_k = np.random.uniform(0.0,1.0,number_of_weights)
+    number_of_weights = np.prod(kernel_shape)
+    v_r = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_i = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_j = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_k = np.random.uniform(-1.0,1.0,number_of_weights)
+
+
 
     v_r = v_r.reshape(kernel_shape)
     v_i = v_i.reshape(kernel_shape)
     v_j = v_j.reshape(kernel_shape)
     v_k = v_k.reshape(kernel_shape)
 
-    weight_r = v_r * s
-    weight_i = v_i * s
-    weight_j = v_j * s
-    weight_k = v_k * s
+    weight_r = v_r
+    weight_i = v_i
+    weight_j = v_j
+    weight_k = v_k
     return (weight_r, weight_i, weight_j, weight_k)
 
 
 def quaternion_init(in_features, out_features, rng, kernel_size=None, criterion='glorot'):
-    
+
     if kernel_size is not None:
         receptive_field = np.prod(kernel_size)
         fan_in          = in_features  * receptive_field
         fan_out         = out_features * receptive_field
     else:
-        fan_in          = in_features  
-        fan_out         = out_features 
+        fan_in          = in_features
+        fan_out         = out_features
 
     if criterion == 'glorot':
         s = 1. / np.sqrt(2*(fan_in + fan_out))
@@ -610,9 +680,8 @@ def quaternion_init(in_features, out_features, rng, kernel_size=None, criterion=
         s = 1. / np.sqrt(2*fan_in)
     else:
         raise ValueError('Invalid criterion: ' + criterion)
-    
+
     rng = RandomState(np.random.randint(1,1234))
-    
 
     # Generating randoms and purely imaginary quaternions :
     if kernel_size is None:
@@ -624,17 +693,17 @@ def quaternion_init(in_features, out_features, rng, kernel_size=None, criterion=
             kernel_shape = (out_features, in_features) + (*kernel_size,)
 
     modulus = chi.rvs(4,loc=0,scale=s,size=kernel_shape)
-    number_of_weights = np.prod(kernel_shape) 
-    v_i = np.random.normal(0,1.0,number_of_weights)
-    v_j = np.random.normal(0,1.0,number_of_weights)
-    v_k = np.random.normal(0,1.0,number_of_weights)
-    
+    number_of_weights = np.prod(kernel_shape)
+    v_i = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_j = np.random.uniform(-1.0,1.0,number_of_weights)
+    v_k = np.random.uniform(-1.0,1.0,number_of_weights)
+
     # Purely imaginary quaternions unitary
     for i in range(0, number_of_weights):
-    	norm = np.sqrt(v_i[i]**2 + v_j[i]**2 + v_k[i]**2 +0.0001)
-    	v_i[i]/= norm
-    	v_j[i]/= norm
-    	v_k[i]/= norm
+        norm = np.sqrt(v_i[i]**2 + v_j[i]**2 + v_k[i]**2 +0.0001)
+        v_i[i]/= norm
+        v_j[i]/= norm
+        v_k[i]/= norm
     v_i = v_i.reshape(kernel_shape)
     v_j = v_j.reshape(kernel_shape)
     v_k = v_k.reshape(kernel_shape)
@@ -654,7 +723,7 @@ def create_dropout_mask(dropout_p, size, rng, as_type, operation='linear'):
         return Variable(torch.from_numpy(mask).type(as_type))
     else:
          raise Exception("create_dropout_mask accepts only 'linear'. Found operation = "
-                        + str(operation))   
+                        + str(operation))
 
 def affect_init(r_weight, i_weight, j_weight, k_weight, init_func, rng, init_criterion):
     if r_weight.size() != i_weight.size() or r_weight.size() != j_weight.size() or \
